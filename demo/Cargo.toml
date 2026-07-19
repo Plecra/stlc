@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 parser = { path = "../parser" }
 derivations = { path = "../derivations" }
+kernel = { path = "../kernel" }
