@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["ast", "core", "demo", "derivations","kernel", "parser"]
