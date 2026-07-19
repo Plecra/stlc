@@ -20,7 +20,7 @@ fn Typed(context: Context, expr: Expr, ty: Type) -> Typed {
 ///
 /// A slightly more direct interpretation of inference rules is as parameterized rules:
 ///
-/// ```rust
+/// ```ignore
 /// fn app(context: Vec<(String, Type)>, f: Expr, a: Expr, at: Type, ret: Type) -> Rule {
 ///     Rule(
 ///         Typed(context.clone(), Expr::App(Box::new(f.clone()), Box::new(a.clone())), ret.clone()),
@@ -54,13 +54,13 @@ impl Proof {
 #[derive(Debug)]
 pub struct IncompatibleStep(());
 impl Proof {
-    /// ```rust,no_run
+    /// ```ignore
     /// x : A |- x : A
     /// ```
     pub fn var(name: String, ty: Type) -> Self {
         Proof(Typed(vec![(name.clone(), ty.clone())], Expr::Var(name), ty))
     }
-    /// ```rust,no_run
+    /// ```ignore
     /// cx |- f : A -> B
     /// cx |- e : A
     /// ---
@@ -79,7 +79,7 @@ impl Proof {
             b_ty,
         )))
     }
-    /// ```rust,no_run
+    /// ```ignore
     /// cx, x: A |- e : B
     /// ---
     /// cx |- (\x. e) : A -> B
@@ -95,14 +95,14 @@ impl Proof {
     /// We capture the weakening and contraction rules in a single verification step:
     /// performing simultaneous exchange of the context while introducing new bindings
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// cx |- e : A
     /// |- cx, cx2
     /// ---
     /// cx, cx2 |- e : A
     /// ```
     ///
-    /// ```rust,no_run
+    /// ```ignore
     /// cx, x : T, y : U, cx2 |- e : A
     /// ---
     /// cx, y : U, x : T, cx2 |- e : A
