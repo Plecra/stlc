@@ -16,6 +16,6 @@ pub enum Expr {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
-    Base(String),
+    Var(String),
     Arrow(Box<Type>, Box<Type>),
 }

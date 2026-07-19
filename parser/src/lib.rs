@@ -32,7 +32,7 @@ fn parse_ty_atom(src: &mut &[u8], errors: &mut Vec<Error>) -> core::Type {
             *src = r;
             let name = ident(n, src);
             ws(src);
-            core::Type::Base(name)
+            core::Type::Var(name)
         }
         [b'(', r @ ..] => {
             *src = r;
@@ -54,7 +54,7 @@ fn parse_ty_atom(src: &mut &[u8], errors: &mut Vec<Error>) -> core::Type {
                 loc: src.len(),
                 kind: ErrorKind::BadType,
             });
-            core::Type::Base("".to_string())
+            core::Type::Var("".to_string())
         }
     }
 }

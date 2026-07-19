@@ -51,8 +51,6 @@ impl Proof {
     }
 }
 
-pub type Rebind = Vec<Result<(String, Type), usize>>;
-
 #[derive(Debug)]
 pub struct IncompatibleStep(());
 impl Proof {
