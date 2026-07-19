@@ -1,0 +1,427 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Plecra <marli@frost.red>
+Date: Sun, 19 Jul 2026 19:23:40 +0100
+Subject: [PATCH] implement type variables and abstract entailment for them
+
+---
+ Cargo.lock             |   1 +
+ demo/Cargo.toml        |   3 +-
+ demo/src/main.rs       |  14 +++---
+ derivations/src/lib.rs |  96 +++++++++++++++++++++++++++++-------
+ kernel/src/lib.rs      | 107 +++++++++++++++++++++++++++++++++--------
+ 5 files changed, 177 insertions(+), 44 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 93949e0..75fdfab 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -18,6 +18,7 @@ name = "demo"
+ version = "0.1.0"
+ dependencies = [
+  "derivations",
++ "kernel",
+  "parser",
+ ]
+ 
+diff --git a/demo/Cargo.toml b/demo/Cargo.toml
+index 52dc3ba..74c9165 100644
+--- a/demo/Cargo.toml
++++ b/demo/Cargo.toml
+@@ -5,4 +5,5 @@ edition = "2024"
+ 
+ [dependencies]
+ parser = { path = "../parser" }
+-derivations = { path = "../derivations" }
+\ No newline at end of file
++derivations = { path = "../derivations" }
++kernel = { path = "../kernel" }
+\ No newline at end of file
+diff --git a/demo/src/main.rs b/demo/src/main.rs
+index acdad62..fdf442e 100644
+--- a/demo/src/main.rs
++++ b/demo/src/main.rs
+@@ -1,22 +1,24 @@
+ fn main() {
+     let (a, errors) = parser::parse(&mut &b"\\x : A. x"[..]);
+-    let p = derivations::verify(&a, &mut derivations::ContextIndex::new([].into_iter())).unwrap();
++    let p = derivations::verify(&a, &mut derivations::ContextIndex::new([("A".into(), kernel::Binding::TypeVar)].into_iter()).unwrap()).unwrap();
+     assert!(errors.is_empty());
+     assert_eq!(format!("{a:?}"), r#"Abs("x", Var("A"), Var("x"))"#);
+-    assert_eq!(format!("{p:?}"), r#"Proof(Typed { context: [], expr: Abs("x", Var("x")), ty: Arrow(Var("A"), Var("A")) })"#);
++    assert_eq!(format!("{p:?}"), r#"Proof(Entails { context: [("A", TypeVar)], concl: Typed { expr: Abs("x", Var("x")), ty: Arrow(Var("A"), Var("A")) } })"#);
+     let (a, errors) = parser::parse(&mut &b"
+         \\toString : Int -> String. \\add : Int -> Int -> Int. \\n : Int. \\m : Int. toString (add n m)
+     "[..]);
+-    let p = derivations::verify(&a, &mut derivations::ContextIndex::new([].into_iter())).unwrap();
++    let p = derivations::verify(&a, &mut derivations::ContextIndex::new([("Int".into(), kernel::Binding::TypeVar),
++        ("String".into(), kernel::Binding::TypeVar),
++    ].into_iter()).unwrap()).unwrap();
+     assert!(errors.is_empty());
+     assert_eq!(format!("{a:?}"), r#"Abs("toString", Arrow(Var("Int"), Var("String")), Abs("add", Arrow(Var("Int"), Arrow(Var("Int"), Var("Int"))), Abs("n", Var("Int"), Abs("m", Var("Int"), App(Var("toString"), App(App(Var("add"), Var("n")), Var("m")))))))"#);
+     assert_eq!(format!("{p:?}"),
+-        concat!("Proof(Typed { context: [], ",
++        concat!("Proof(Entails { context: [(\"Int\", TypeVar), (\"String\", TypeVar)], concl: Typed { ",
+             r#"expr: Abs("toString", Abs("add", Abs("n", Abs("m", App(Var("toString"), App(App(Var("add"), Var("n")), Var("m"))))))), "#,
+             r#"ty: Arrow(Arrow(Var("Int"), Var("String")), Arrow(Arrow(Var("Int"), Arrow(Var("Int"), Var("Int"))), Arrow(Var("Int"), Arrow(Var("Int"), Var("String"))))) "#,
+-        "})"));
++        "} })"));
+     let (a, errors) = parser::parse(&mut &b"\\x : A. \\y : B. x y"[..]);
+-    let _ = derivations::verify(&a, &mut derivations::ContextIndex::new([].into_iter())).unwrap_err();
++    let _ = derivations::verify(&a, &mut derivations::ContextIndex::new([].into_iter()).unwrap()).unwrap_err();
+     assert!(errors.is_empty());
+     assert_eq!(format!("{a:?}"), r#"Abs("x", Var("A"), Abs("y", Var("B"), App(Var("x"), Var("y"))))"#);
+ }
+diff --git a/derivations/src/lib.rs b/derivations/src/lib.rs
+index 2423247..88d0377 100644
+--- a/derivations/src/lib.rs
++++ b/derivations/src/lib.rs
+@@ -2,10 +2,56 @@ use ast::TypedEv;
+ 
+ use std::collections::HashMap;
+ #[derive(Debug)]
+-pub struct ContextIndex(HashMap<String, core::Type>);
++enum BindingProof {
++    Var(kernel::UnivProof),
++    TypeVar,
++}
++impl BindingProof {
++    fn as_var(&self) -> Option<&kernel::UnivProof> {
++        match self {
++            BindingProof::Var(p) => Some(p),
++            BindingProof::TypeVar => None,
++        }
++    }
++    fn matches_binding(&self, binding: &kernel::Binding) -> bool {
++        match (self, binding) {
++            (BindingProof::Var(p), kernel::Binding::Var(ty)) => p.get().concl.ty == *ty,
++            (BindingProof::TypeVar, kernel::Binding::TypeVar) => true,
++            _ => false,
++        }
++    }
++}
++#[derive(Debug)]
++pub struct ContextIndex(HashMap<String, BindingProof>);
++
++fn verify_ty(ty: &core::Type) -> kernel::UnivProof {
++    match ty {
++        core::Type::Var(name) => kernel::Proof::type_var(name.clone()),
++        core::Type::Arrow(a, b) => func(verify_ty(a), verify_ty(b)),
++    }
++}
++fn compatible_cx(index: &ContextIndex, cx: &[(String, kernel::Binding)]) -> bool {
++    cx.iter().all(|(n, b)| index.0.get(n).is_some_and(|bp| bp.matches_binding(b)))
++}
+ impl ContextIndex {
+-    pub fn new(binds: impl Iterator<Item = (String, core::Type)>) -> Self {
+-        ContextIndex(binds.collect())
++    pub fn new(binds: impl Iterator<Item = (String, kernel::Binding)>) -> Result<Self, Error> {
++        let mut this = ContextIndex(HashMap::new());
++        for (n, bind) in binds {
++            match bind {
++                kernel::Binding::TypeVar => {
++                    if this.0.insert(n, BindingProof::TypeVar).is_some() {
++                        return Err(Error(()));
++                    }
++                }
++                kernel::Binding::Var(ty) => {
++                    let univ = verify_ty(&ty);
++                    if !compatible_cx(&this, &univ.get().context) || this.0.insert(n, BindingProof::Var(univ)).is_some() {
++                        return Err(Error(()));
++                    }
++                }
++            }
++        }
++        Ok(this)
+     }
+ }
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -16,7 +62,7 @@ impl From<kernel::IncompatibleStep> for Error {
+     }
+ }
+ /// [`kernel::Proof::app`] with automatic merging of the contexts of the function and argument.
+-pub fn app(f: kernel::Proof, a: kernel::Proof) -> Result<kernel::Proof, Error> {
++pub fn app(f: kernel::TypedProof, a: kernel::TypedProof) -> Result<kernel::TypedProof, Error> {
+     let mut cx = vec![];
+     let mut present = std::collections::HashSet::new();
+     for (s, t) in f.get().context.iter().chain(&a.get().context) {
+@@ -26,8 +72,19 @@ pub fn app(f: kernel::Proof, a: kernel::Proof) -> Result<kernel::Proof, Error> {
+     }
+     Ok(f.structural(cx.clone())?.app(a.structural(cx)?)?)
+ }
++/// [`kernel::Proof::func`] with automatic merging of the contexts of the function and argument.
++pub fn func(f: kernel::UnivProof, a: kernel::UnivProof) -> kernel::UnivProof {
++    let mut cx = vec![];
++    let mut present = std::collections::HashSet::new();
++    for (s, t) in f.get().context.iter().chain(&a.get().context) {
++        if present.insert(s) {
++            cx.push((s.clone(), t.clone()));
++        }
++    }
++    f.structural(cx.clone()).unwrap().func(a.structural(cx).unwrap()).unwrap()
++}
+ /// [`kernel::Proof::abs`] with automatic exchange of the variable binding anywhere in the context.
+-pub fn abs(body: kernel::Proof, param: String, ty: core::Type) -> Result<kernel::Proof, Error> {
++pub fn abs(body: kernel::TypedProof, param: String, ty: core::Type) -> Result<kernel::TypedProof, Error> {
+     let mut cx = body.get().context.clone();
+     let n = cx.len() - 1;
+ 
+@@ -38,12 +95,12 @@ pub fn abs(body: kernel::Proof, param: String, ty: core::Type) -> Result<kernel:
+         .enumerate()
+         .find(|(_, (n, _))| n == &param)
+     {
+-        if t != &ty {
++        if t != &kernel::Binding::Var(ty) {
+             return Err(Error(()));
+         }
+         cx.swap(i, n);
+     } else {
+-        cx.push((param, ty));
++        cx.push((param, kernel::Binding::Var(ty)));
+     }
+     Ok(body.structural(cx)?.abs()?)
+ }
+@@ -55,12 +112,13 @@ pub fn abs(body: kernel::Proof, param: String, ty: core::Type) -> Result<kernel:
+ /// and store `HasType(derivation, ty)`.
+ ///
+ /// The `cx` will be unchanged after this function returns.
+-pub fn verify(ev: &ast::TypedEv, cx: &mut ContextIndex) -> Result<kernel::Proof, Error> {
++pub fn verify(ev: &ast::TypedEv, cx: &mut ContextIndex) -> Result<kernel::TypedProof, Error> {
+     match ev {
+         TypedEv::Var(n) => {
+             cx.0.get(n)
+-                .map(|t| kernel::Proof::var(n.clone(), t.clone()))
++                .and_then(|b| b.as_var())
+                 .ok_or(Error(()))
++                .and_then(|t| Ok(kernel::Proof::var(n.clone(), t.clone())?))
+         }
+         TypedEv::App(f, a) => {
+             let ft = verify(f, cx)?;
+@@ -68,7 +126,11 @@ pub fn verify(ev: &ast::TypedEv, cx: &mut ContextIndex) -> Result<kernel::Proof,
+             app(ft, at)
+         }
+         TypedEv::Abs(s, ty, b) => {
+-            let old = cx.0.insert(s.clone(), ty.clone());
++            let univ = verify_ty(ty);
++            if !compatible_cx(cx, &univ.get().context) {
++                return Err(Error(()));
++            }
++            let old = cx.0.insert(s.clone(), BindingProof::Var(univ));
+             let bt = verify(b, cx)?;
+             if let Some(old) = old {
+                 cx.0.insert(s.clone(), old);
+@@ -80,25 +142,25 @@ pub fn verify(ev: &ast::TypedEv, cx: &mut ContextIndex) -> Result<kernel::Proof,
+     }
+ }
+ /// A convenient way to construct a derivation while verifying it.
+-pub struct RecordedProof(TypedEv, kernel::Proof);
++pub struct RecordedProof(TypedEv, kernel::TypedProof);
+ impl RecordedProof {
+     pub fn evidence(&self) -> &TypedEv {
+         &self.0
+     }
+-    pub fn proof(&self) -> &kernel::Proof {
++    pub fn proof(&self) -> &kernel::TypedProof {
+         &self.1
+     }
+-    pub fn into_inner(self) -> (TypedEv, kernel::Proof) {
++    pub fn into_inner(self) -> (TypedEv, kernel::TypedProof) {
+         (self.0, self.1)
+     }
+     pub fn show(ev: TypedEv, cx: &mut ContextIndex) -> Result<Self, Error> {
+         let proof = verify(&ev, cx)?;
+         Ok(RecordedProof(ev, proof))
+     }
+-    pub fn var(name: String, ty: core::Type) -> Self {
++    pub fn var(name: String, ty: core::Type) -> Result<Self, Error> {
+         let ev = TypedEv::Var(name.clone());
+-        let proof = kernel::Proof::var(name, ty);
+-        RecordedProof(ev, proof)
++        let proof = kernel::Proof::var(name, verify_ty(&ty))?;
++        Ok(RecordedProof(ev, proof))
+     }
+     pub fn app(self, arg: RecordedProof) -> Result<Self, Error> {
+         let ev = TypedEv::App(Box::new(self.0), Box::new(arg.0));
+@@ -118,7 +180,7 @@ impl RecordedProof {
+     pub fn consistent(&self) -> Result<(), Error> {
+         (verify(
+             &self.0,
+-            &mut ContextIndex::new(self.1.get().context.iter().cloned()),
++            &mut ContextIndex::new(self.1.get().context.iter().cloned())?,
+         )?
+         .get()
+             == self.1.get())
+diff --git a/kernel/src/lib.rs b/kernel/src/lib.rs
+index 9852b6b..4b0ce6e 100644
+--- a/kernel/src/lib.rs
++++ b/kernel/src/lib.rs
+@@ -1,14 +1,44 @@
+ use core::{Expr, Type};
+-pub type Context = Vec<(String, Type)>;
+ #[derive(Debug, Clone, PartialEq, Eq)]
+-pub struct Typed {
++pub enum Binding {
++    Var(Type),
++    TypeVar,
++}
++pub type Context = Vec<(String, Binding)>;
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Entails<T> {
+     pub context: Context,
++    pub concl: T,
++}
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Typed {
+     pub expr: Expr,
+     pub ty: Type,
+ }
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Univ {
++    pub ty: Type,
++}
++#[allow(non_snake_case)]
++fn Typed(context: Context, expr: Expr, ty: Type) -> Entails<Typed> {
++    Entails { context, concl: Typed { expr, ty } }
++}
+ #[allow(non_snake_case)]
+-fn Typed(context: Context, expr: Expr, ty: Type) -> Typed {
+-    Typed { context, expr, ty }
++fn Univ(context: Context, ty: Type) -> Entails<Univ> {
++    Entails { context, concl: Univ { ty } }
++}
++impl Entails<Typed> {
++    fn expr(&self) -> &Expr {
++        &self.concl.expr
++    }
++    fn ty(&self) -> &Type {
++        &self.concl.ty
++    }
++}
++impl Entails<Univ> {
++    fn ty(&self) -> &Type {
++        &self.concl.ty
++    }
+ }
+ /// A proof of a [`Typed`] judgement, built from the inference rules defined
+ /// on this type.
+@@ -40,25 +70,60 @@ fn Typed(context: Context, expr: Expr, ty: Type) -> Typed {
+ /// rule's parameters so we avoid redundantly passing them as well. (For these STLC rules, app and abs'
+ /// premises both entirely fix their parameters)
+ #[derive(Debug, Clone, PartialEq, Eq)]
+-pub struct Proof(Typed);
++pub struct Proof<T>(Entails<T>);
++pub type TypedProof = Proof<Typed>;
++pub type UnivProof = Proof<Univ>;
+ 
+-impl Proof {
+-    pub fn get(&self) -> &Typed {
++impl Binding {
++    pub fn as_var(&self) -> Option<&Type> {
++        match self {
++            Binding::Var(ty) => Some(ty),
++            Binding::TypeVar => None,
++        }
++    }
++    pub fn to_var(self) -> Option<Type> {
++        match self {
++            Binding::Var(ty) => Some(ty),
++            Binding::TypeVar => None,
++        }
++    }
++}
++impl<T> Proof<T> {
++    pub fn get(&self) -> &Entails<T> {
+         &self.0
+     }
+-    pub fn into_inner(self) -> Typed {
++    pub fn into_inner(self) -> Entails<T> {
+         self.0
+     }
+ }
+ 
+ #[derive(Debug)]
+ pub struct IncompatibleStep(());
+-impl Proof {
++impl Proof<Univ> {
++    pub fn type_var(name: String) -> Self {
++        Proof(Univ(vec![(name.clone(), Binding::TypeVar)], Type::Var(name)))
++    }
++    pub fn func(self, ret: Proof<Univ>) -> Result<Self, IncompatibleStep> {
++        if self.0.context != ret.0.context {
++            return Err(IncompatibleStep(()));
++        }
++        Ok(Proof(Univ(
++            self.0.context,
++            Type::Arrow(Box::new(self.0.concl.ty), Box::new(ret.0.concl.ty)),
++        )))
++    }
++}
++impl Proof<Typed> {
+     /// ```rust,no_run
+     /// x : A |- x : A
+     /// ```
+-    pub fn var(name: String, ty: Type) -> Self {
+-        Proof(Typed(vec![(name.clone(), ty.clone())], Expr::Var(name), ty))
++    pub fn var(name: String, mut wf_ty: Proof<Univ>) -> Result<Self, IncompatibleStep> {
++        if wf_ty.0.context.iter().any(|(n, _)| n == &name) {
++            return Err(IncompatibleStep(()));
++        }
++        let ty = wf_ty.0.ty().clone();
++        wf_ty.0.context.push((name.clone(), Binding::Var(ty.clone())));
++        Ok(Proof(Typed(wf_ty.0.context, Expr::Var(name), ty)))
+     }
+     /// ```rust,no_run
+     /// cx |- f : A -> B
+@@ -66,10 +131,10 @@ impl Proof {
+     /// ---
+     /// cx |- f e : B
+     /// ```
+-    pub fn app(self, arg: Proof) -> Result<Self, IncompatibleStep> {
+-        let (context, b_ty, f, e) = match self.0.ty {
+-            Type::Arrow(argt, rett) if (&arg.0.context, &arg.0.ty) == (&self.0.context, &*argt) => {
+-                (arg.0.context, *rett, self.0.expr, arg.0.expr)
++    pub fn app(self, arg: Proof<Typed>) -> Result<Self, IncompatibleStep> {
++        let (context, b_ty, f, e) = match self.0.concl.ty {
++            Type::Arrow(argt, rett) if (&arg.0.context, arg.0.ty()) == (&self.0.context, &*argt) => {
++                (arg.0.context, *rett, self.0.concl.expr, arg.0.concl.expr)
+             }
+             _ => return Err(IncompatibleStep(())),
+         };
+@@ -85,13 +150,15 @@ impl Proof {
+     /// cx |- (\x. e) : A -> B
+     /// ```
+     pub fn abs(mut self) -> Result<Self, IncompatibleStep> {
+-        let (param, t) = self.0.context.pop().ok_or(IncompatibleStep(()))?;
++        let (param, t) = self.0.context.pop().and_then(|(name, b)| Some((name, b.to_var()?))).ok_or(IncompatibleStep(()))?;
+         Ok(Proof(Typed(
+             self.0.context,
+-            Expr::Abs(param, Box::new(self.0.expr)),
+-            Type::Arrow(Box::new(t.clone()), Box::new(self.0.ty.clone())),
++            Expr::Abs(param, Box::new(self.0.concl.expr)),
++            Type::Arrow(Box::new(t), Box::new(self.0.concl.ty)),
+         )))
+     }
++}
++impl<T> Proof<T> {
+     /// We capture the weakening and contraction rules in a single verification step:
+     /// performing simultaneous exchange of the context while introducing new bindings
+     ///
+@@ -107,7 +174,7 @@ impl Proof {
+     /// ---
+     /// cx, y : U, x : T, cx2 |- e : A
+     /// ```
+-    pub fn structural(self, context: Vec<(String, Type)>) -> Result<Self, IncompatibleStep> {
++    pub fn structural(self, context: Vec<(String, Binding)>) -> Result<Self, IncompatibleStep> {
+         use std::collections::HashMap;
+         // note: this same logic can be implemented 'syntactically' by
+         //     forall i in context, forall j, i < j ==> context[i].name != context[j].name
+@@ -125,6 +192,6 @@ impl Proof {
+         {
+             return Err(IncompatibleStep(()));
+         }
+-        Ok(Proof(Typed(context, self.0.expr, self.0.ty)))
++        Ok(Proof(Entails { context, concl: self.0.concl }))
+     }
+ }
+-- 
+2.47.1.windows.2
+
