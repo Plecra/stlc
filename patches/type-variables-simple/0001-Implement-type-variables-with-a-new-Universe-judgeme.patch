@@ -7,7 +7,7 @@ We also extend the construction of the context index of the derivation check to 
 ---
  Cargo.lock             |  1 +
  demo/Cargo.toml        |  3 +-
- demo/src/main.rs       | 10 +++----
+ demo/tests/examples.rs       | 10 +++----
  derivations/src/lib.rs | 64 +++++++++++++++++++++++++++++++-----------
  kernel/src/lib.rs      | 62 ++++++++++++++++++++++++++++++++--------
  5 files changed, 105 insertions(+), 35 deletions(-)
@@ -37,12 +37,12 @@ index 52dc3ba..74c9165 100644
 +derivations = { path = "../derivations" }
 +kernel = { path = "../kernel" }
 \ No newline at end of file
-diff --git a/demo/src/main.rs b/demo/src/main.rs
+diff --git a/demo/tests/examples.rs b/demo/tests/examples.rs
 index acdad62..55f9594 100644
---- a/demo/src/main.rs
-+++ b/demo/src/main.rs
-@@ -1,22 +1,22 @@
- fn main() {
+--- a/demo/tests/examples.rs
++++ b/demo/tests/examples.rs
+@@ -2,22 +2,22 @@
+ fn examples() {
      let (a, errors) = parser::parse(&mut &b"\\x : A. x"[..]);
 -    let p = derivations::verify(&a, &mut derivations::ContextIndex::new([].into_iter())).unwrap();
 +    let p = derivations::verify(&a, &mut derivations::ContextIndex::new([("A".into(), kernel::Bound::TypeVar)].into_iter()).unwrap()).unwrap();
@@ -268,7 +268,7 @@ index 9852b6b..c5e16bd 100644
  pub struct IncompatibleStep(());
 -impl Proof {
 +impl Proof<Typed> {
-     /// ```rust,no_run
+     /// ```ignore
      /// x : A |- x : A
      /// ```
 -    pub fn var(name: String, ty: Type) -> Self {
@@ -281,7 +281,7 @@ index 9852b6b..c5e16bd 100644
 +        context.push((name.clone(), Bound::Var(ty.0.ty.clone())));
 +        Ok(Proof(Typed(context, Expr::Var(name), ty.0.ty)))
      }
-     /// ```rust,no_run
+     /// ```ignore
      /// cx |- f : A -> B
 @@ -66,7 +82,7 @@ impl Proof {
      /// ---
