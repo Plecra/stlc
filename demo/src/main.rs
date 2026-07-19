@@ -15,4 +15,8 @@ fn main() {
             r#"expr: Abs("toString", Abs("add", Abs("n", Abs("m", App(Var("toString"), App(App(Var("add"), Var("n")), Var("m"))))))), "#,
             r#"ty: Arrow(Arrow(Base("Int"), Base("String")), Arrow(Arrow(Base("Int"), Arrow(Base("Int"), Base("Int"))), Arrow(Base("Int"), Arrow(Base("Int"), Base("String"))))) "#,
         "})"));
+    let (a, errors) = parser::parse(&mut &b"\\x : A. \\y : B. x y"[..]);
+    let _ = derivations::verify(&a, &mut derivations::ContextIndex::new([].into_iter())).unwrap_err();
+    assert!(errors.is_empty());
+    assert_eq!(format!("{a:?}"), r#"Abs("x", Base("A"), Abs("y", Base("B"), App(Var("x"), Var("y"))))"#);
 }
