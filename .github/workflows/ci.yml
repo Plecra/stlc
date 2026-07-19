@@ -1,4 +1,9 @@
 
+on:
+  push:
+    branches:
+      - '**'
+
 jobs:
   base:
     runs-on: ubuntu-latest
