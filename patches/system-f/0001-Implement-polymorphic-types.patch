@@ -1,0 +1,378 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Plecra <marli@frost.red>
+Date: Mon, 20 Jul 2026 08:32:09 +0100
+Subject: [PATCH] Implement polymorphic types
+
+This is a very literal implementation of system F's typing rules: We've added a type former, constructor and eliminator for forall types and directly adapted the existing abstraction inference code for them
+---
+ ast/src/lib.rs         |  2 ++
+ core/src/lib.rs        |  3 ++
+ demo/tests/examples.rs |  6 ++++
+ derivations/src/lib.rs | 71 ++++++++++++++++++++++++++++++++++++++++
+ kernel/src/lib.rs      | 72 +++++++++++++++++++++++++++++++++++++++++
+ parser/src/lib.rs      | 73 +++++++++++++++++++++++++++++++++++++++++-
+ 6 files changed, 226 insertions(+), 1 deletion(-)
+
+diff --git a/ast/src/lib.rs b/ast/src/lib.rs
+index 89450a9..35f641d 100644
+--- a/ast/src/lib.rs
++++ b/ast/src/lib.rs
+@@ -25,4 +25,6 @@ pub enum TypedEv {
+     Var(String),
+     App(Box<TypedEv>, Box<TypedEv>),
+     Abs(String, core::Type, Box<TypedEv>),
++    PolyAbs(String, Box<TypedEv>),
++    PolyApp(Box<TypedEv>, core::Type),
+ }
+diff --git a/core/src/lib.rs b/core/src/lib.rs
+index 41788a2..b4242e4 100644
+--- a/core/src/lib.rs
++++ b/core/src/lib.rs
+@@ -13,9 +13,12 @@ pub enum Expr {
+     Var(String),
+     App(Box<Expr>, Box<Expr>),
+     Abs(String, Box<Expr>),
++    PolyAbs(String, Box<Expr>),
++    PolyApp(Box<Expr>, Box<Type>),
+ }
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum Type {
+     Var(String),
+     Arrow(Box<Type>, Box<Type>),
++    Forall(String, Box<Type>),
+ }
+diff --git a/demo/tests/examples.rs b/demo/tests/examples.rs
+index badbd7b..78c2c35 100644
+--- a/demo/tests/examples.rs
++++ b/demo/tests/examples.rs
+@@ -20,4 +20,10 @@ fn examples() {
+     let _ = derivations::verify(&a, &mut derivations::ContextIndex::new([("A".into(), kernel::Bound::TypeVar), ("B".into(), kernel::Bound::TypeVar)].into_iter()).unwrap()).unwrap_err();
+     assert!(errors.is_empty());
+     assert_eq!(format!("{a:?}"), r#"Abs("x", Var("A"), Abs("y", Var("B"), App(Var("x"), Var("y"))))"#);
++    let (a, errors) = parser::parse(&mut &b"\\x : (\\/A. A -> A -> A). \\y : B. \\z : B. x $ B z y"[..]);
++    // let _ = derivations::verify(&a, &mut derivations::ContextIndex::new([("B".into(), kernel::Bound::TypeVar)].into_iter()).unwrap()).unwrap_err();
++    let p = derivations::verify(&a, &mut derivations::ContextIndex::new([("B".into(), kernel::Bound::TypeVar)].into_iter()).unwrap()).unwrap();
++    assert!(errors.is_empty());
++    assert_eq!(format!("{p:?}"), r#"Proof(Typed { context: [("B", TypeVar)], expr: Abs("x", Abs("y", Abs("z", App(App(PolyApp(Var("x"), Var("B")), Var("z")), Var("y"))))), ty: Arrow(Forall("A", Arrow(Var("A"), Arrow(Var("A"), Var("A")))), Arrow(Var("B"), Arrow(Var("B"), Var("B")))) })"#);
++    assert_eq!(format!("{a:?}"), r#"Abs("x", Forall("A", Arrow(Var("A"), Arrow(Var("A"), Var("A")))), Abs("y", Var("B"), Abs("z", Var("B"), App(App(PolyApp(Var("x"), Var("B")), Var("z")), Var("y")))))"#);
+ }
+diff --git a/derivations/src/lib.rs b/derivations/src/lib.rs
+index 9ddd0de..6a72440 100644
+--- a/derivations/src/lib.rs
++++ b/derivations/src/lib.rs
+@@ -10,7 +10,11 @@ fn verify_universe(t: &core::Type) -> kernel::Proof<kernel::Universe> {
+         core::Type::Var(s) => kernel::Proof::type_var(s.clone()),
+         core::Type::Arrow(a, b) => {
+             kernel::Proof::arrow(verify_universe(a), verify_universe(b))
++        },
++        core::Type::Forall(param, body) => {
++            forall(verify_universe(body), param.clone())
+         }
++
+     }
+ }
+ impl ContextIndex {
+@@ -55,6 +59,17 @@ pub fn app(f: Proof<Typed>, a: Proof<Typed>) -> Result<Proof<Typed>, Error> {
+     }
+     Ok(f.structural(cx.clone())?.app(a.structural(cx)?)?)
+ }
++/// [`kernel::Proof::poly_app`] with automatic merging of the contexts of the function and argument.
++pub fn poly_app(f: Proof<Typed>, a: Proof<Universe>) -> Result<Proof<Typed>, Error> {
++    let mut cx = vec![];
++    let mut present = std::collections::HashSet::new();
++    for (s, t) in f.get().context.iter().map(|(s, t)| (s, t)).chain(a.get().context.iter().map(|s| (s, &kernel::Bound::TypeVar))) {
++        if present.insert(s) {
++            cx.push((s.clone(), t.clone()));
++        }
++    }
++    Ok(f.structural(cx.clone())?.poly_app(a)?)
++}
+ /// [`kernel::Proof::abs`] with automatic exchange of the variable binding anywhere in the context.
+ pub fn abs(body: Proof<Typed>, param: String, ty: core::Type) -> Result<Proof<Typed>, Error> {
+     let mut cx = body.get().context.clone();
+@@ -76,6 +91,47 @@ pub fn abs(body: Proof<Typed>, param: String, ty: core::Type) -> Result<Proof<Ty
+     }
+     Ok(body.structural(cx)?.abs()?)
+ }
++/// [`kernel::Proof::abs`] with automatic exchange of the variable binding anywhere in the context.
++pub fn poly_abs(body: Proof<Typed>, param: String) -> Result<Proof<Typed>, Error> {
++    let mut cx = body.get().context.clone();
++    let n = cx.len() - 1;
++
++    if let Some((i, (_, t))) = body
++        .get()
++        .context
++        .iter()
++        .enumerate()
++        .find(|(_, (n, _))| n == &param)
++    {
++        if t != &kernel::Bound::TypeVar {
++            return Err(Error(()));
++        }
++        cx.swap(i, n);
++    } else {
++        cx.push((param, kernel::Bound::TypeVar));
++    }
++    Ok(body.structural(cx)?.poly_abs()?)
++}
++/// [`kernel::Proof::forall`] with automatic exchange of the variable binding anywhere in the context.
++pub fn forall(body: Proof<Universe>, param: String) -> Proof<Universe> {
++    let mut cx = body.get().context.clone();
++    let mut n = cx.len();
++
++    for i in (0..cx.len()).rev() {
++        if cx[i] == param {
++            cx.swap(i, n - 1);
++            n -= 1;
++        }
++    }
++    if n == cx.len() {
++        cx.push(param);
++    } else {
++        while n + 1 < cx.len() {
++            cx.pop();
++        }
++    }
++    body.structural_ty(cx).unwrap().forall().unwrap()
++}
+ /// Verify a derivation against a context, producing a proof of its typing within
+ /// a subset of that context.
+ ///
+@@ -97,6 +153,21 @@ pub fn verify(ev: &ast::TypedEv, cx: &mut ContextIndex) -> Result<Proof<Typed>,
+             let at = verify(a, cx)?;
+             app(ft, at)
+         }
++        TypedEv::PolyApp(f, ty) => {
++            let ft = verify(f, cx)?;
++            let substituted_ty = verify_universe(ty);
++            poly_app(ft, substituted_ty)
++        }
++        TypedEv::PolyAbs(param, body) => {
++            let old = cx.0.insert(param.clone(), None);
++            let bt = verify(body, cx)?;
++            if let Some(old) = old {
++                cx.0.insert(param.clone(), old);
++            } else {
++                cx.0.remove(param);
++            }
++            poly_abs(bt, param.clone())
++        }
+         TypedEv::Abs(s, ty, b) => {
+             let old = cx.0.insert(s.clone(), Some(cx.verify_ty(ty)?));
+             let bt = verify(b, cx)?;
+diff --git a/kernel/src/lib.rs b/kernel/src/lib.rs
+index 1b63935..ea7ad84 100644
+--- a/kernel/src/lib.rs
++++ b/kernel/src/lib.rs
+@@ -64,6 +64,22 @@ impl<T> Proof<T> {
+ 
+ #[derive(Debug)]
+ pub struct IncompatibleStep(());
++
++fn substitute_type(ty: &Type, param: &str, replacement: &Type) -> Type {
++    match ty {
++        Type::Var(name) if name == param => replacement.clone(),
++        Type::Var(_) => ty.clone(),
++        Type::Arrow(arg, ret) => Type::Arrow(
++            Box::new(substitute_type(arg, param, replacement)),
++            Box::new(substitute_type(ret, param, replacement)),
++        ),
++        Type::Forall(param2, body) if param2 != param => Type::Forall(
++            param2.clone(),
++            Box::new(substitute_type(body, param, replacement)),
++        ),
++        Type::Forall(_, _) => ty.clone(), // shadowed
++    }
++}
+ impl Proof<Typed> {
+     /// ```ignore
+     /// x : A |- x : A
+@@ -111,6 +127,44 @@ impl Proof<Typed> {
+             }), Box::new(self.0.ty)),
+         )))
+     }
++    
++    /// ```ignore
++    /// cx |- e : ∀ x. B
++    /// ---
++    /// cx |- e A : B[x := A]
++    /// ```
++    pub fn poly_app(self, arg: Proof<Universe>) -> Result<Self, IncompatibleStep> {
++        let (context, b_ty, f, param, t) = match self.0.ty {
++            Type::Forall(param, rett) if arg.0.context.iter().eq(self.0.context.iter().filter(|(_, b)| matches!(b, Bound::TypeVar)).map(|(s, _)| s)) => {
++                (self.0.context, *rett, self.0.expr, param, arg.0.ty)
++            }
++            _ => return Err(IncompatibleStep(())),
++        };
++        let substituted_ty = substitute_type(&b_ty, &param, &t);
++        Ok(Proof(Typed(
++            context,
++            Expr::PolyApp(Box::new(f), Box::new(t)),
++            substituted_ty,
++        )))
++    }
++    
++    /// ```ignore
++    /// cx, x: type |- e : B
++    /// ---
++    /// cx |- (Λ x. e) : ∀ x. B
++    /// ```
++    pub fn poly_abs(mut self) -> Result<Self, IncompatibleStep> {
++        let (param, t) = self.0.context.pop().ok_or(IncompatibleStep(()))?;
++        match t {
++            Bound::Var(ty) => return Err(IncompatibleStep(())),
++            Bound::TypeVar => (),
++        }
++        Ok(Proof(Typed(
++            self.0.context,
++            Expr::PolyAbs(param.clone(), Box::new(self.0.expr)),
++            Type::Forall(param, Box::new(self.0.ty)),
++        )))
++    }
+     /// We capture the weakening and contraction rules in a single verification step:
+     /// performing simultaneous exchange of the context while introducing new bindings
+     ///
+@@ -165,4 +219,22 @@ impl Proof<Universe> {
+             ty: Type::Arrow(Box::new(self.0.ty), Box::new(arg.0.ty)),
+         })
+     }
++    pub fn forall(mut self) -> Result<Self, IncompatibleStep> {
++        let param = self.0.context.pop().ok_or(IncompatibleStep(()))?;
++        Ok(Proof(Universe {
++            context: self.0.context,
++            ty: Type::Forall(param, Box::new(self.0.ty)),
++        }))
++    }
++    pub fn structural_ty(self, context: Vec<String>) -> Result<Self, IncompatibleStep> {
++        let index = context.iter().collect::<std::collections::HashSet<_>>();
++        if !self.get().context.iter().all(|s| index.contains(s))
++        {
++            return Err(IncompatibleStep(()));
++        }
++        Ok(Proof(Universe {
++            context,
++            ty: self.0.ty,
++        }))
++    }
+ }
+\ No newline at end of file
+diff --git a/parser/src/lib.rs b/parser/src/lib.rs
+index 72c129f..9298a08 100644
+--- a/parser/src/lib.rs
++++ b/parser/src/lib.rs
+@@ -58,8 +58,37 @@ fn parse_ty_atom(src: &mut &[u8], errors: &mut Vec<Error>) -> core::Type {
+         }
+     }
+ }
++fn parse_forall_ty(src: &mut &[u8], errors: &mut Vec<Error>) -> core::Type {
++    let loc = src.len();
++    let name = ident(src, src);
++    if name.is_empty() {
++        errors.push(Error {
++            loc,
++            kind: ErrorKind::LambdaNameMissing,
++        });
++    }
++    ws(src);
++    if let [b'.', r @ ..] = *src {
++        *src = r;
++    } else {
++        errors.push(Error {
++            loc,
++            kind: ErrorKind::LambdaDotMissing,
++        });
++    };
++    ws(src);
++    let body = parse_ty(src, errors);
++    core::Type::Forall(name, Box::new(body))
++}
+ fn parse_ty(src: &mut &[u8], errors: &mut Vec<Error>) -> core::Type {
+-    let ty = parse_ty_atom(src, errors);
++    let ty = match src {
++        [b'\\', b'/', r @ ..] => {
++            *src = r;
++            ws(src);
++            return parse_forall_ty(src, errors);
++        }
++        _ => parse_ty_atom(src, errors)
++    };
+     match *src {
+         [b'-', b'>', r @ ..] => {
+             *src = r;
+@@ -67,6 +96,12 @@ fn parse_ty(src: &mut &[u8], errors: &mut Vec<Error>) -> core::Type {
+             let t2 = parse_ty(src, errors);
+             core::Type::Arrow(Box::new(ty), Box::new(t2))
+         }
++        [b'\\', b'/', r @ ..] => {
++            *src = r;
++            ws(src);
++            let t2 = parse_forall_ty(src, errors);
++            core::Type::Arrow(Box::new(ty), Box::new(t2))
++        }
+         _ => ty,
+     }
+ }
+@@ -135,6 +170,28 @@ fn parse_expr_atom(src: &mut &[u8], errors: &mut Vec<Error>) -> TypedEv {
+         }
+     }
+ }
++fn parse_forall(src: &mut &[u8], errors: &mut Vec<Error>) -> TypedEv {
++    let loc = src.len();
++    let name = ident(src, src);
++    if name.is_empty() {
++        errors.push(Error {
++            loc,
++            kind: ErrorKind::LambdaNameMissing,
++        });
++    }
++    ws(src);
++    if let [b'.', r @ ..] = *src {
++        *src = r;
++    } else {
++        errors.push(Error {
++            loc,
++            kind: ErrorKind::LambdaDotMissing,
++        });
++    };
++    ws(src);
++    let body = parse_expr(src, errors);
++    TypedEv::PolyAbs(name, Box::new(body))
++}
+ fn parse_expr(src: &mut &[u8], errors: &mut Vec<Error>) -> TypedEv {
+     let mut ex = match *src {
+         [b'a'..=b'z' | b'_' | b'A'..=b'Z' | b'(', ..] => parse_expr_atom(src, errors),
+@@ -142,6 +199,10 @@ fn parse_expr(src: &mut &[u8], errors: &mut Vec<Error>) -> TypedEv {
+             *src = r;
+             return parse_lam(src, errors)
+         },
++        [b'/', b'\\', r @ ..] => {
++            *src = r;
++            return parse_forall(src, errors)
++        },
+         _ => todo!("{:?}", String::from_utf8_lossy(src)),
+     };
+     loop {
+@@ -150,10 +211,20 @@ fn parse_expr(src: &mut &[u8], errors: &mut Vec<Error>) -> TypedEv {
+                 *src = r;
+                 return TypedEv::App(Box::new(ex), Box::new(parse_lam(src, errors)));
+             }
++            [b'/', b'\\', r @ ..] => {
++                *src = r;
++                return TypedEv::App(Box::new(ex), Box::new(parse_forall(src, errors)));
++            }
+             [b'a'..=b'z' | b'_' | b'A'..=b'Z' | b'(', ..] => {
+                 let arg = parse_expr_atom(src, errors);
+                 ex = TypedEv::App(Box::new(ex), Box::new(arg));
+             }
++            [b'$', r @ ..] => {
++                *src = r;
++                ws(src);
++                let ty = parse_ty(src, errors);
++                ex = TypedEv::PolyApp(Box::new(ex), ty);
++            }
+             _ => return ex,
+         }
+     }
+-- 
+2.47.1.windows.2
+

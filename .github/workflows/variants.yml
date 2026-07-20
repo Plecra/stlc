@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [type-variables-simple]
+        variant: [type-variables-simple, system-f]
     steps:
       - uses: actions/checkout@v4
         with:
