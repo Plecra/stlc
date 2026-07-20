@@ -30,7 +30,7 @@ jobs:
           git config user.email "github-actions@github.com"
           target="${{ github.ref_name }}-${{ matrix.variant }}-variant"
           git checkout -b "$target"
-          git am patches/${{ matrix.variant }}/*.patch
+          sh patches/${{ matrix.variant }}/apply.sh
 
       - run: cargo test
 
