@@ -1,1 +1,1 @@
-git am "$(dirname "$0")"/*.patch
+git am "$(dirname "$(realpath $0)")"/*.patch

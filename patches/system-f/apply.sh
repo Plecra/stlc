@@ -1,2 +1,2 @@
-source "$(dirname "$0")"/../type-variables-simple/apply.sh
-git am "$(dirname "$0")"/*.patch
+sh "$(dirname "$(realpath $0)")"/../type-variables-simple/apply.sh
+git am "$(dirname "$(realpath $0)")"/*.patch
