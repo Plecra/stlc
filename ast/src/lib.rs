@@ -25,4 +25,6 @@ pub enum TypedEv {
     Var(String),
     App(Box<TypedEv>, Box<TypedEv>),
     Abs(String, core::Type, Box<TypedEv>),
+    PolyAbs(String, Box<TypedEv>),
+    PolyApp(Box<TypedEv>, core::Type),
 }

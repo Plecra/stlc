@@ -58,13 +58,48 @@ fn parse_ty_atom(src: &mut &[u8], errors: &mut Vec<Error>) -> core::Type {
         }
     }
 }
+fn parse_forall_ty(src: &mut &[u8], errors: &mut Vec<Error>) -> core::Type {
+    let loc = src.len();
+    let name = ident(src, src);
+    if name.is_empty() {
+        errors.push(Error {
+            loc,
+            kind: ErrorKind::LambdaNameMissing,
+        });
+    }
+    ws(src);
+    if let [b'.', r @ ..] = *src {
+        *src = r;
+    } else {
+        errors.push(Error {
+            loc,
+            kind: ErrorKind::LambdaDotMissing,
+        });
+    };
+    ws(src);
+    let body = parse_ty(src, errors);
+    core::Type::Forall(name, Box::new(body))
+}
 fn parse_ty(src: &mut &[u8], errors: &mut Vec<Error>) -> core::Type {
-    let ty = parse_ty_atom(src, errors);
+    let ty = match src {
+        [b'\\', b'/', r @ ..] => {
+            *src = r;
+            ws(src);
+            return parse_forall_ty(src, errors);
+        }
+        _ => parse_ty_atom(src, errors)
+    };
     match *src {
         [b'-', b'>', r @ ..] => {
             *src = r;
             ws(src);
             let t2 = parse_ty(src, errors);
+            core::Type::Arrow(Box::new(ty), Box::new(t2))
+        }
+        [b'\\', b'/', r @ ..] => {
+            *src = r;
+            ws(src);
+            let t2 = parse_forall_ty(src, errors);
             core::Type::Arrow(Box::new(ty), Box::new(t2))
         }
         _ => ty,
@@ -135,12 +170,38 @@ fn parse_expr_atom(src: &mut &[u8], errors: &mut Vec<Error>) -> TypedEv {
         }
     }
 }
+fn parse_forall(src: &mut &[u8], errors: &mut Vec<Error>) -> TypedEv {
+    let loc = src.len();
+    let name = ident(src, src);
+    if name.is_empty() {
+        errors.push(Error {
+            loc,
+            kind: ErrorKind::LambdaNameMissing,
+        });
+    }
+    ws(src);
+    if let [b'.', r @ ..] = *src {
+        *src = r;
+    } else {
+        errors.push(Error {
+            loc,
+            kind: ErrorKind::LambdaDotMissing,
+        });
+    };
+    ws(src);
+    let body = parse_expr(src, errors);
+    TypedEv::PolyAbs(name, Box::new(body))
+}
 fn parse_expr(src: &mut &[u8], errors: &mut Vec<Error>) -> TypedEv {
     let mut ex = match *src {
         [b'a'..=b'z' | b'_' | b'A'..=b'Z' | b'(', ..] => parse_expr_atom(src, errors),
         [b'\\', r @ ..] => {
             *src = r;
             return parse_lam(src, errors)
+        },
+        [b'/', b'\\', r @ ..] => {
+            *src = r;
+            return parse_forall(src, errors)
         },
         _ => todo!("{:?}", String::from_utf8_lossy(src)),
     };
@@ -150,9 +211,19 @@ fn parse_expr(src: &mut &[u8], errors: &mut Vec<Error>) -> TypedEv {
                 *src = r;
                 return TypedEv::App(Box::new(ex), Box::new(parse_lam(src, errors)));
             }
+            [b'/', b'\\', r @ ..] => {
+                *src = r;
+                return TypedEv::App(Box::new(ex), Box::new(parse_forall(src, errors)));
+            }
             [b'a'..=b'z' | b'_' | b'A'..=b'Z' | b'(', ..] => {
                 let arg = parse_expr_atom(src, errors);
                 ex = TypedEv::App(Box::new(ex), Box::new(arg));
+            }
+            [b'$', r @ ..] => {
+                *src = r;
+                ws(src);
+                let ty = parse_ty(src, errors);
+                ex = TypedEv::PolyApp(Box::new(ex), ty);
             }
             _ => return ex,
         }

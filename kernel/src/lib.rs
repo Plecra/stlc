@@ -64,6 +64,22 @@ impl<T> Proof<T> {
 
 #[derive(Debug)]
 pub struct IncompatibleStep(());
+
+fn substitute_type(ty: &Type, param: &str, replacement: &Type) -> Type {
+    match ty {
+        Type::Var(name) if name == param => replacement.clone(),
+        Type::Var(_) => ty.clone(),
+        Type::Arrow(arg, ret) => Type::Arrow(
+            Box::new(substitute_type(arg, param, replacement)),
+            Box::new(substitute_type(ret, param, replacement)),
+        ),
+        Type::Forall(param2, body) if param2 != param => Type::Forall(
+            param2.clone(),
+            Box::new(substitute_type(body, param, replacement)),
+        ),
+        Type::Forall(_, _) => ty.clone(), // shadowed
+    }
+}
 impl Proof<Typed> {
     /// ```ignore
     /// x : A |- x : A
@@ -109,6 +125,44 @@ impl Proof<Typed> {
                 Bound::Var(ty) => ty,
                 _ => return Err(IncompatibleStep(())),
             }), Box::new(self.0.ty)),
+        )))
+    }
+    
+    /// ```ignore
+    /// cx |- e : ∀ x. B
+    /// ---
+    /// cx |- e A : B[x := A]
+    /// ```
+    pub fn poly_app(self, arg: Proof<Universe>) -> Result<Self, IncompatibleStep> {
+        let (context, b_ty, f, param, t) = match self.0.ty {
+            Type::Forall(param, rett) if arg.0.context.iter().eq(self.0.context.iter().filter(|(_, b)| matches!(b, Bound::TypeVar)).map(|(s, _)| s)) => {
+                (self.0.context, *rett, self.0.expr, param, arg.0.ty)
+            }
+            _ => return Err(IncompatibleStep(())),
+        };
+        let substituted_ty = substitute_type(&b_ty, &param, &t);
+        Ok(Proof(Typed(
+            context,
+            Expr::PolyApp(Box::new(f), Box::new(t)),
+            substituted_ty,
+        )))
+    }
+    
+    /// ```ignore
+    /// cx, x: type |- e : B
+    /// ---
+    /// cx |- (Λ x. e) : ∀ x. B
+    /// ```
+    pub fn poly_abs(mut self) -> Result<Self, IncompatibleStep> {
+        let (param, t) = self.0.context.pop().ok_or(IncompatibleStep(()))?;
+        match t {
+            Bound::Var(ty) => return Err(IncompatibleStep(())),
+            Bound::TypeVar => (),
+        }
+        Ok(Proof(Typed(
+            self.0.context,
+            Expr::PolyAbs(param.clone(), Box::new(self.0.expr)),
+            Type::Forall(param, Box::new(self.0.ty)),
         )))
     }
     /// We capture the weakening and contraction rules in a single verification step:
@@ -164,5 +218,23 @@ impl Proof<Universe> {
             context,
             ty: Type::Arrow(Box::new(self.0.ty), Box::new(arg.0.ty)),
         })
+    }
+    pub fn forall(mut self) -> Result<Self, IncompatibleStep> {
+        let param = self.0.context.pop().ok_or(IncompatibleStep(()))?;
+        Ok(Proof(Universe {
+            context: self.0.context,
+            ty: Type::Forall(param, Box::new(self.0.ty)),
+        }))
+    }
+    pub fn structural_ty(self, context: Vec<String>) -> Result<Self, IncompatibleStep> {
+        let index = context.iter().collect::<std::collections::HashSet<_>>();
+        if !self.get().context.iter().all(|s| index.contains(s))
+        {
+            return Err(IncompatibleStep(()));
+        }
+        Ok(Proof(Universe {
+            context,
+            ty: self.0.ty,
+        }))
     }
 }

@@ -10,7 +10,11 @@ fn verify_universe(t: &core::Type) -> kernel::Proof<kernel::Universe> {
         core::Type::Var(s) => kernel::Proof::type_var(s.clone()),
         core::Type::Arrow(a, b) => {
             kernel::Proof::arrow(verify_universe(a), verify_universe(b))
+        },
+        core::Type::Forall(param, body) => {
+            forall(verify_universe(body), param.clone())
         }
+
     }
 }
 impl ContextIndex {
@@ -55,6 +59,17 @@ pub fn app(f: Proof<Typed>, a: Proof<Typed>) -> Result<Proof<Typed>, Error> {
     }
     Ok(f.structural(cx.clone())?.app(a.structural(cx)?)?)
 }
+/// [`kernel::Proof::poly_app`] with automatic merging of the contexts of the function and argument.
+pub fn poly_app(f: Proof<Typed>, a: Proof<Universe>) -> Result<Proof<Typed>, Error> {
+    let mut cx = vec![];
+    let mut present = std::collections::HashSet::new();
+    for (s, t) in f.get().context.iter().map(|(s, t)| (s, t)).chain(a.get().context.iter().map(|s| (s, &kernel::Bound::TypeVar))) {
+        if present.insert(s) {
+            cx.push((s.clone(), t.clone()));
+        }
+    }
+    Ok(f.structural(cx.clone())?.poly_app(a)?)
+}
 /// [`kernel::Proof::abs`] with automatic exchange of the variable binding anywhere in the context.
 pub fn abs(body: Proof<Typed>, param: String, ty: core::Type) -> Result<Proof<Typed>, Error> {
     let mut cx = body.get().context.clone();
@@ -76,6 +91,47 @@ pub fn abs(body: Proof<Typed>, param: String, ty: core::Type) -> Result<Proof<Ty
     }
     Ok(body.structural(cx)?.abs()?)
 }
+/// [`kernel::Proof::abs`] with automatic exchange of the variable binding anywhere in the context.
+pub fn poly_abs(body: Proof<Typed>, param: String) -> Result<Proof<Typed>, Error> {
+    let mut cx = body.get().context.clone();
+    let n = cx.len() - 1;
+
+    if let Some((i, (_, t))) = body
+        .get()
+        .context
+        .iter()
+        .enumerate()
+        .find(|(_, (n, _))| n == &param)
+    {
+        if t != &kernel::Bound::TypeVar {
+            return Err(Error(()));
+        }
+        cx.swap(i, n);
+    } else {
+        cx.push((param, kernel::Bound::TypeVar));
+    }
+    Ok(body.structural(cx)?.poly_abs()?)
+}
+/// [`kernel::Proof::forall`] with automatic exchange of the variable binding anywhere in the context.
+pub fn forall(body: Proof<Universe>, param: String) -> Proof<Universe> {
+    let mut cx = body.get().context.clone();
+    let mut n = cx.len();
+
+    for i in (0..cx.len()).rev() {
+        if cx[i] == param {
+            cx.swap(i, n - 1);
+            n -= 1;
+        }
+    }
+    if n == cx.len() {
+        cx.push(param);
+    } else {
+        while n + 1 < cx.len() {
+            cx.pop();
+        }
+    }
+    body.structural_ty(cx).unwrap().forall().unwrap()
+}
 /// Verify a derivation against a context, producing a proof of its typing within
 /// a subset of that context.
 ///
@@ -96,6 +152,21 @@ pub fn verify(ev: &ast::TypedEv, cx: &mut ContextIndex) -> Result<Proof<Typed>, 
             let ft = verify(f, cx)?;
             let at = verify(a, cx)?;
             app(ft, at)
+        }
+        TypedEv::PolyApp(f, ty) => {
+            let ft = verify(f, cx)?;
+            let substituted_ty = verify_universe(ty);
+            poly_app(ft, substituted_ty)
+        }
+        TypedEv::PolyAbs(param, body) => {
+            let old = cx.0.insert(param.clone(), None);
+            let bt = verify(body, cx)?;
+            if let Some(old) = old {
+                cx.0.insert(param.clone(), old);
+            } else {
+                cx.0.remove(param);
+            }
+            poly_abs(bt, param.clone())
         }
         TypedEv::Abs(s, ty, b) => {
             let old = cx.0.insert(s.clone(), Some(cx.verify_ty(ty)?));

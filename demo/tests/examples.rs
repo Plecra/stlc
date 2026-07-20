@@ -20,4 +20,10 @@ fn examples() {
     let _ = derivations::verify(&a, &mut derivations::ContextIndex::new([("A".into(), kernel::Bound::TypeVar), ("B".into(), kernel::Bound::TypeVar)].into_iter()).unwrap()).unwrap_err();
     assert!(errors.is_empty());
     assert_eq!(format!("{a:?}"), r#"Abs("x", Var("A"), Abs("y", Var("B"), App(Var("x"), Var("y"))))"#);
+    let (a, errors) = parser::parse(&mut &b"\\x : (\\/A. A -> A -> A). \\y : B. \\z : B. x $ B z y"[..]);
+    // let _ = derivations::verify(&a, &mut derivations::ContextIndex::new([("B".into(), kernel::Bound::TypeVar)].into_iter()).unwrap()).unwrap_err();
+    let p = derivations::verify(&a, &mut derivations::ContextIndex::new([("B".into(), kernel::Bound::TypeVar)].into_iter()).unwrap()).unwrap();
+    assert!(errors.is_empty());
+    assert_eq!(format!("{p:?}"), r#"Proof(Typed { context: [("B", TypeVar)], expr: Abs("x", Abs("y", Abs("z", App(App(PolyApp(Var("x"), Var("B")), Var("z")), Var("y"))))), ty: Arrow(Forall("A", Arrow(Var("A"), Arrow(Var("A"), Var("A")))), Arrow(Var("B"), Arrow(Var("B"), Var("B")))) })"#);
+    assert_eq!(format!("{a:?}"), r#"Abs("x", Forall("A", Arrow(Var("A"), Arrow(Var("A"), Var("A")))), Abs("y", Var("B"), Abs("z", Var("B"), App(App(PolyApp(Var("x"), Var("B")), Var("z")), Var("y")))))"#);
 }

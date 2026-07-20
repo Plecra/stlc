@@ -13,9 +13,12 @@ pub enum Expr {
     Var(String),
     App(Box<Expr>, Box<Expr>),
     Abs(String, Box<Expr>),
+    PolyAbs(String, Box<Expr>),
+    PolyApp(Box<Expr>, Box<Type>),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Var(String),
     Arrow(Box<Type>, Box<Type>),
+    Forall(String, Box<Type>),
 }
